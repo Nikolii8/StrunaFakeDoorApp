@@ -1,76 +1,70 @@
-from flask import Flask, jsonify, send_from_directory, request
-import sqlite3
+# app.py
+from flask import Flask, jsonify, request, send_from_directory
 import os
+from supabase import create_client, Client
 
-app = Flask(__name__)
-DB_FILE = "counter.db"
+# Вземаме Supabase ключовете от environment variables
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_KEY")
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise RuntimeError("Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Environment Variables")
 
-# Създаваме базата и таблиците, ако не съществуват
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    
-    # Таблица за брояча
-    c.execute("CREATE TABLE IF NOT EXISTS counter (id INTEGER PRIMARY KEY, clicks INTEGER)")
-    c.execute("SELECT * FROM counter WHERE id=1")
-    if not c.fetchone():
-        c.execute("INSERT INTO counter (id, clicks) VALUES (1, 0)")
-    
-    # Таблица за имейлите
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS waitlist (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT NOT NULL
-        )
-    """)
-    
-    conn.commit()
-    conn.close()
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+app = Flask(__name__, static_folder="static")
 
-# Вземаме текущия брой кликове
+def ensure_counter_row():
+    """Проверява дали има ред с id=1, ако няма - създава го"""
+    resp = supabase.table("counter").select("id").eq("id", 1).execute()
+    rows = resp.data or []
+    if not rows:
+        supabase.table("counter").insert({"id": 1, "clicks": 0}).execute()
+
+# Уверяваме се, че редът съществува при стартиране
+ensure_counter_row()
+
 @app.route("/count", methods=["GET"])
 def get_count():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT clicks FROM counter WHERE id=1")
-    clicks = c.fetchone()[0]
-    conn.close()
-    return jsonify({"clicks": clicks})
+    try:
+        resp = supabase.table("counter").select("clicks").eq("id", 1).execute()
+        rows = resp.data or []
+        clicks = rows[0]["clicks"] if rows else 0
+        return jsonify({"clicks": clicks})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-# Натискане на бутона Buy now
 @app.route("/click", methods=["POST"])
 def add_click():
-    # Увеличаваме брояча
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("UPDATE counter SET clicks = clicks + 1 WHERE id=1")
-    conn.commit()
-    c.execute("SELECT clicks FROM counter WHERE id=1")
-    clicks = c.fetchone()[0]
-    conn.close()
-    return jsonify({"clicks": clicks})
+    try:
+        resp = supabase.table("counter").select("clicks").eq("id", 1).execute()
+        rows = resp.data or []
+        clicks = rows[0]["clicks"] if rows else 0
+        new = clicks + 1
+        supabase.table("counter").update({"clicks": new}).eq("id", 1).execute()
+        return jsonify({"clicks": new})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-# Записване на имейл в waitlist
 @app.route("/waitlist", methods=["POST"])
 def add_email():
-    data = request.get_json()
-    email = data.get("email")
-    if not email:
-        return jsonify({"error": "Email is required"}), 400
-    
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("INSERT INTO waitlist (email) VALUES (?)", (email,))
-    conn.commit()
-    conn.close()
-    return jsonify({"success": True})
+    try:
+        data = request.get_json() or {}
+        email = data.get("email")
+        if not email:
+            return jsonify({"error": "Email is required"}), 400
+        supabase.table("waitlist").insert({"email": email}).execute()
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-# Сервиране на HTML и статични файлове
-@app.route("/", defaults={"path": "index.html"})
+# Serve static and HTML files
+@app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
 def serve_frontend(path):
-    return send_from_directory(os.getcwd(), path)
+    if path == "":
+        path = "index.html"
+    return send_from_directory("static", path)
 
+# За локално тестване
 if __name__ == "__main__":
-    init_db()
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 8080))  # Railway задава PORT
+    app.run(host="0.0.0.0", port=port)
